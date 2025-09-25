@@ -1667,6 +1667,11 @@ impl ChatWidget {
             return;
         }
 
+        // Idle: require a second Ctrl-C to exit.
+        if !self.bottom_pane.ctrl_c_quit_hint_is_visible() {
+            self.bottom_pane.show_ctrl_c_quit_hint();
+            return;
+        }
         self.submit_op(Op::Shutdown);
     }
 

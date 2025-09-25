@@ -298,6 +298,11 @@ impl BottomPane {
         self.ctrl_c_quit_hint
     }
 
+    /// True when the "Press Ctrl-C again to quit" hint is visible.
+    pub(crate) fn ctrl_c_quit_hint_is_visible(&self) -> bool {
+        self.ctrl_c_quit_hint
+    }
+
     pub(crate) fn show_esc_backtrack_hint(&mut self) {
         self.esc_backtrack_hint = true;
         self.composer.set_esc_backtrack_hint(true);
