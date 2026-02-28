@@ -4,6 +4,7 @@ use codex_core::auth::AuthMode;
 use codex_core::auth::CLIENT_ID;
 use codex_core::auth::login_with_api_key;
 use codex_core::auth::logout;
+use codex_core::auth::read_openai_api_key_from_env;
 use codex_core::config::Config;
 use codex_login::ServerOptions;
 use codex_login::run_device_code_login;
@@ -12,6 +13,7 @@ use codex_protocol::config_types::ForcedLoginMethod;
 use codex_utils_cli::CliConfigOverrides;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::io::Write;
 use std::path::PathBuf;
 
 const CHATGPT_LOGIN_DISABLED_MESSAGE: &str =
@@ -22,7 +24,7 @@ const LOGIN_SUCCESS_MESSAGE: &str = "Successfully logged in";
 
 fn print_login_server_start(actual_port: u16, auth_url: &str) {
     eprintln!(
-        "Starting local login server on http://localhost:{actual_port}.\nIf your browser did not open, navigate to this URL to authenticate:\n\n{auth_url}\n\nOn a remote or headless machine? Use `codex login --device-auth` instead."
+        "Starting local login server on http://localhost:{actual_port}.\nIf your browser did not open, navigate to this URL to authenticate:\n\n{auth_url}\n\nOn a remote or headless machine? Use `codex login` and choose `Sign in with Device Code` (or run `codex login --device-auth`)."
     );
 }
 
@@ -68,6 +70,120 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
         Err(e) => {
             eprintln!("Error logging in: {e}");
             std::process::exit(1);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractiveLoginChoice {
+    Browser,
+    DeviceCode,
+    ApiKeyFromEnv,
+    Cancel,
+}
+
+fn parse_interactive_login_choice(input: &str) -> Option<InteractiveLoginChoice> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "browser" | "chatgpt" => Some(InteractiveLoginChoice::Browser),
+        "2" | "device" | "device-code" | "devicecode" => Some(InteractiveLoginChoice::DeviceCode),
+        "3" | "api" | "api-key" | "apikey" => Some(InteractiveLoginChoice::ApiKeyFromEnv),
+        "q" | "quit" | "exit" => Some(InteractiveLoginChoice::Cancel),
+        _ => None,
+    }
+}
+
+pub async fn run_login_with_interactive_menu(
+    cli_config_overrides: CliConfigOverrides,
+    issuer_base_url: Option<String>,
+    client_id: Option<String>,
+) -> ! {
+    let config = load_config_or_exit(cli_config_overrides.clone()).await;
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        run_login_with_chatgpt(cli_config_overrides).await;
+    }
+
+    let chatgpt_login_allowed = !matches!(config.forced_login_method, Some(ForcedLoginMethod::Api));
+    let api_key_login_allowed =
+        !matches!(config.forced_login_method, Some(ForcedLoginMethod::Chatgpt));
+
+    loop {
+        eprintln!();
+        eprintln!("Choose a login method:");
+        if chatgpt_login_allowed {
+            eprintln!("  1) Sign in with ChatGPT (browser)");
+            eprintln!("  2) Sign in with Device Code");
+        } else {
+            eprintln!("  1) Sign in with ChatGPT (browser) [disabled]");
+            eprintln!("  2) Sign in with Device Code [disabled]");
+        }
+        if api_key_login_allowed {
+            eprintln!("  3) Use OPENAI_API_KEY from environment");
+        } else {
+            eprintln!("  3) Use OPENAI_API_KEY from environment [disabled]");
+        }
+        eprintln!("  q) Cancel");
+        eprint!("Selection [1]: ");
+        if let Err(err) = std::io::stderr().flush() {
+            eprintln!("Failed to flush prompt: {err}");
+            std::process::exit(1);
+        }
+
+        let mut input = String::new();
+        match std::io::stdin().read_line(&mut input) {
+            Ok(0) => {
+                eprintln!("No input received.");
+                std::process::exit(1);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                eprintln!("Failed to read selection: {err}");
+                std::process::exit(1);
+            }
+        }
+
+        let Some(choice) = parse_interactive_login_choice(&input) else {
+            eprintln!("Invalid selection. Choose 1, 2, 3, or q.");
+            continue;
+        };
+
+        match choice {
+            InteractiveLoginChoice::Browser => {
+                if !chatgpt_login_allowed {
+                    eprintln!("{CHATGPT_LOGIN_DISABLED_MESSAGE}");
+                    continue;
+                }
+                run_login_with_chatgpt(cli_config_overrides.clone()).await;
+            }
+            InteractiveLoginChoice::DeviceCode => {
+                if !chatgpt_login_allowed {
+                    eprintln!("{CHATGPT_LOGIN_DISABLED_MESSAGE}");
+                    continue;
+                }
+                run_login_with_device_code_fallback_to_browser(
+                    cli_config_overrides.clone(),
+                    issuer_base_url.clone(),
+                    client_id.clone(),
+                )
+                .await;
+            }
+            InteractiveLoginChoice::ApiKeyFromEnv => {
+                if !api_key_login_allowed {
+                    eprintln!("{API_KEY_LOGIN_DISABLED_MESSAGE}");
+                    continue;
+                }
+
+                let Some(api_key) = read_openai_api_key_from_env() else {
+                    eprintln!(
+                        "OPENAI_API_KEY is not set. Set it first, then run `codex login` again or pipe the key with `printenv OPENAI_API_KEY | codex login --with-api-key`."
+                    );
+                    continue;
+                };
+                run_login_with_api_key(cli_config_overrides.clone(), api_key).await;
+            }
+            InteractiveLoginChoice::Cancel => {
+                eprintln!("Login canceled.");
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -300,7 +416,10 @@ fn safe_format_key(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::InteractiveLoginChoice;
+    use super::parse_interactive_login_choice;
     use super::safe_format_key;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn formats_long_key() {
@@ -312,5 +431,34 @@ mod tests {
     fn short_key_returns_stars() {
         let key = "sk-proj-12345";
         assert_eq!(safe_format_key(key), "***");
+    }
+
+    #[test]
+    fn parse_interactive_login_choice_handles_supported_values() {
+        assert_eq!(
+            parse_interactive_login_choice(""),
+            Some(InteractiveLoginChoice::Browser)
+        );
+        assert_eq!(
+            parse_interactive_login_choice("1"),
+            Some(InteractiveLoginChoice::Browser)
+        );
+        assert_eq!(
+            parse_interactive_login_choice("2"),
+            Some(InteractiveLoginChoice::DeviceCode)
+        );
+        assert_eq!(
+            parse_interactive_login_choice("3"),
+            Some(InteractiveLoginChoice::ApiKeyFromEnv)
+        );
+        assert_eq!(
+            parse_interactive_login_choice("q"),
+            Some(InteractiveLoginChoice::Cancel)
+        );
+        assert_eq!(
+            parse_interactive_login_choice("exit"),
+            Some(InteractiveLoginChoice::Cancel)
+        );
+        assert_eq!(parse_interactive_login_choice("not-a-choice"), None);
     }
 }

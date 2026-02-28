@@ -13,8 +13,8 @@ use codex_cli::WindowsCommand;
 use codex_cli::login::read_api_key_from_stdin;
 use codex_cli::login::run_login_status;
 use codex_cli::login::run_login_with_api_key;
-use codex_cli::login::run_login_with_chatgpt;
 use codex_cli::login::run_login_with_device_code;
+use codex_cli::login::run_login_with_interactive_menu;
 use codex_cli::login::run_logout;
 use codex_cloud_tasks::Cli as CloudTasksCli;
 use codex_exec::Cli as ExecCli;
@@ -695,7 +695,12 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                         let api_key = read_api_key_from_stdin();
                         run_login_with_api_key(login_cli.config_overrides, api_key).await;
                     } else {
-                        run_login_with_chatgpt(login_cli.config_overrides).await;
+                        run_login_with_interactive_menu(
+                            login_cli.config_overrides,
+                            login_cli.issuer_base_url,
+                            login_cli.client_id,
+                        )
+                        .await;
                     }
                 }
             }
